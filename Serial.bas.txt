@@ -1,0 +1,2276 @@
+REM >Serial
+*|
+*| Serial
+*|
+*| 'n' port serial card hardware driver
+*|
+*| Version 0.52, (c) 1992-1996 Hugo Fiennes of The Serial Port
+*|
+
+DIM CODE% 16*1024
+
+debug%=0
+Version$="0.52"
+
+PROCSetConstants
+Create$="29 Jan 1996"
+
+FOR cardt%=0 TO 4
+FOR slot%=0 TO 4
+card%=cardt%
+CASE cardt% OF
+  WHEN 0:
+    issue$=" for Serial Port/Issue 1 cards"
+    PortOffset=&20
+    FIFOstatus=&40
+    IRQstatus=&80
+    IRQmask=1
+    maxspeed=115200
+    podule_m=&3F
+    podule_p=&B9
+    hardcoded%=TRUE
+  WHEN 1:
+    issue$=" for Serial Port/Issue 2 cards"
+    PortOffset=&20
+    FIFOstatus=&40
+    IRQstatus=&80
+    IRQmask=1
+    maxspeed=230400
+    podule_m=&3F
+    podule_p=&B9
+    hardcoded%=TRUE
+  WHEN 2:
+    issue$=" for Atomwide/Issue 1 or 2 cards"
+    PortOffset=&400
+    FIFOstatus=&1C00
+    IRQstatus=&1C00
+    IRQmask=7
+    maxspeed=460800
+    podule_m=&17
+    podule_p=&90
+    hardcoded%=FALSE
+  WHEN 3:
+    card%=2
+    issue$=" for Hugo's card"
+    PortOffset=&400
+    FIFOstatus=&1C00
+    IRQstatus=&1C00
+    IRQmask=7
+    maxspeed=230400
+    podule_m=&3F
+    podule_p=&B9
+    hardcoded%=FALSE
+  WHEN 4:
+    card%=0
+    issue$=" for ISAdapter"
+    PortOffset=&400
+    FIFOstatus=&1C00
+    IRQstatus=&1C00
+    IRQmask=7
+    maxspeed=115200
+    hardcoded%=FALSE
+ENDCASE
+
+IF slot%<4 THEN
+  issue$+=" (slot "+STR$slot%+")"
+ENDIF
+
+FOR PASS=0 TO 2 STEP 2
+P%=CODE%:[OPT PASS
+;
+; ***********************************************************************
+; **                                                                   **
+; **               DEVELOPMENT HISTORY                                 **
+; **                                                                   **
+; ***********************************************************************
+;
+; Date          Author          Description
+; ----          ------          -----------
+; 14-Nov-1992   HBF             Basic module working
+; 20-Nov-1992   HBF             Tx hardware & xon/xoff flow control
+; 26-Nov-1992   HBF             Enables PIRQ's on MEMC
+; 10-Dec-1992   HBF             Inserted own buffer handling as opposed
+;                               to BufferManager as otherwise things
+;                               like Xon/Xoff are a pain.
+; 15-Dec-1992   HBF             Disabled IRQ's around all sensitive code
+;                               to ensure atomics.
+; 14-Jan-1993   HBF             Done code to implement RX flow control -
+;                               both RTS and Xon/Xoff control with 1/4 &
+;                               3/4 thresholds.
+; 18-Jan-1993   HBF             Added * commands to set buffer sizes,
+;                               and to go with it threshold calculation.
+; 20-Jan-1993   HBF             Poketx removed and now happens every time
+;                               anything enters the buffer, just in case.
+; 09-Feb-1993   HBF             TX ints are left permanently enabled now,
+;                               this seemed to be causing lots of probs.
+; 12-Mar-1993   HBF             Now scans for multiple cards and
+;                               allocates for them.
+; 30-Mar-1993   HBF             TXblock bug fixed
+; 27-Jul-1993   HBF             Issue 2 card tweaks
+; 19-Dec-1993   HBF             RX fifo trigger set to 1 for Issue 2
+;                               cards - possible problem with EXAR chip?
+; 17-Jan-1994   HBF             Problems with block ops corrupting regs
+;                               fixed thanks to Brian Brunswick!
+; 06-Oct-1995   HBF             Lost source to 0.41! (arrgh!). From Dissi
+;                               I've refixed the problem with tx/block
+;                               kicking UART when flow control shouldn't
+;                               allow it - I hope this is the only thing
+;                               I fixed in 0.41...
+; 18-Oct-1995   HBF             Tweaks for variable number of UARTs per
+;                               card (initialisation, IRQ handlers, etc).
+;                               8 slot address mapping too!
+; 23-Oct-1995   HBF             Baud rate table entries extended. _Info
+;                               SWI to return essential information for
+;                               blockdriver. Atomwide podule id now used.
+; 25-Oct-1995   HBF             Tweaks to UART detection routines.
+;                               0.44 Release
+; 02-Nov-1995   HBF             Reads uart modem status on every RX irq
+;                               to try & kick flow control on dead RI
+;                               delta irq, and also on TX data/TX count
+;                               SWIs
+; 18-Nov-1995   HBF             Bug in RXpurge fixed (corrupt regs)
+;                               TXFIFO no longer used - just up to 16
+;                               bytes loaded into FIFO on every TX
+;                               empty IRQ. RX data ready not checked
+;                               when IRQ called - IRQ means it must
+;                               have data!
+;                               mov r0,r0's added to after all teqp's.
+;                               0.48 Release
+; 18-Nov-1995   HBF             Problem with setting of BREAK bit fixed.
+;                               0.49 Release
+; 22-Dec-1995   HBF             After Xon received, TX is kicked,
+;                               regardless of CTS/DSR twiddling.
+;                               0.50 Release
+; 06-Jan-1996   HBF             SerialCOM hookins - service routine
+;                               can be linked in to modem control
+;                               line change for flow control in PC card
+;                               Actual port number stored in info block.
+;                               New RX data/TX emptied past threshold
+;                               also passed to event routine.
+; 21-Jan-1996   HBF             Routines added to detect Atomwide Iss2
+;                               cards with fixed control line wiring.
+;                               Tidied up some kludgy bits in irq
+;                               handling wrt atomwide iss1 card.
+;                               0.52 Release
+; 16-Feb-1996   HBF             Hardcoded module generation from generic
+;                               source. No other code changes.
+; 02-May-1996   HBF             Work on including ISAdapter serial source
+;                               into main serial driver source (card type
+;                               4).
+;
+; ***********************************************************************
+;
+.RMst           equd    0                       ; Start application
+                equd    RM_Init-RMst            ; Initialisation
+                equd    RM_Final-RMst           ; Finalisation
+                equd    RM_Service-RMst         ; Service call
+                equd    RM_Title-RMst           ; Title string
+                equd    RM_Help-RMst            ; Help string
+                equd    RM_Keywords-RMst        ; Command help/keywords
+                equd    &44A40                  ; SWI chunk
+                equd    RM_SWIHandler-RMst      ; SWI handler
+                equd    RM_SWIDecode-RMst       ; SWI name decode
+                equd    0
+;
+; =======================================================================
+;
+; MODULE EDIT & TITLE STRINGS
+; ===========================
+;
+.RM_Help        equs  "SerialDriver"+t$+Version$+" ("+Create$+")"+issue$+z$:align
+.RM_Title       equs  "SerialDriver"+z$: align
+;
+; =======================================================================
+;
+; INITIALISE MODULE
+; =================
+;
+.RM_Init
+                stmfd   stack !, {r0-r11, link}
+
+                ldr     r2, [r12]               ; read workspace ptr
+                cmp     r2, #0                  ; is it virgin?
+                bne     warmstart               ; no
+
+                mov     r0, #6
+                ldr     r3, WorkSizeD
+                swi     "OS_Module"             ; claim workspace
+                str     r2, [r12]               ; save ptr in private
+                mov     r12,r2
+
+                mov     r0,#0
+                strb    r0,[r12,#MaxPort]
+                mov     r10,r12
+]
+IF cardt%=4 THEN
+[OPTPASS
+                swi     "XISA_GetBaseAddress"    ; Read hardware base
+                bvs     noisa
+                str     r0,hardwaretable
+                add     r1,r1,#&2000
+                add     r1,r1,#&10
+                str     r1,isapage
+                
+                adr     r0,tname                ; Register with ISA
+                adr     r1,tversion
+                mov     r2,#0
+                mov     r3,#0
+                swi     "XISA_Register"
+                str     r0,tid
+                
+                mov     r0,#0
+                strb    r0,[r12,#MaxPort]
+                mov     r10,r12
+
+                bl      isaadd_ports
+                str     r10,irq_maxports
+                
+                mov     r0,#3
+                adr     r1,irq
+                mov     r2,r12
+                ldr     r3,tid
+                swi     "XISA_ClaimInt"
+                cmp     r0,#0
+                moveq   r0,#3
+                beq     starterror         ; failed to claim int 3
+
+                mov     r0,#4
+                adr     r1,irq
+                mov     r2,r12
+                ldr     r3,tid
+                swi     "XISA_ClaimInt"
+                cmp     r0,#0
+                moveq   r0,#4              ; failed to claim int 4
+                beq     starterror
+                
+                bal     endisa
+
+.tname          equs  "Multi IO Serial"+z$+STRING$(16,z$)
+
+.tversion       equs  "0.42 16/10/95"+z$+STRING$(18,z$)
+                align
+.tid            equd  0
+
+.comtable
+                equd    &3f8
+                equd    &2f8
+                equd    &3e8
+                equd    &2e8
+
+.isaadd_ports
+                stmfd   r13!,{r14}
+
+                ldr     r11,hardwaretable        ; Get podule address
+
+                ; com1
+                ldr     r1,(comtable+0)
+                add     r1,r11,r1,lsl#2
+                bl      actual_add
+
+                ; com2
+                ldr     r1,(comtable+4)
+                add     r1,r11,r1,lsl#2
+                bl      actual_add
+
+                ; com3
+                ldr     r1,(comtable+8)
+                add     r1,r11,r1,lsl#2
+                bl      actual_add
+
+                ; com4
+                ldr     r1,(comtable+12)
+                add     r1,r11,r1,lsl#2
+                bl      actual_add
+
+                ldmfd   r13!,{pc}
+
+.actual_add
+                mov     r0,#42
+                strb    r0,[r1,#ScratchReg]
+                ldrb    r0,[r1,#ScratchReg]
+                cmp     r0,#42
+                movne   pc,r14
+
+                mov     r0,#(255-42)
+                strb    r0,[r1,#ScratchReg]
+                ldrb    r0,[r1,#ScratchReg]
+                cmp     r0,#(255-42)
+                movne   pc,r14
+
+                str     r1,[r10,#port_Line]
+                add     r10,r10,#64
+
+                ldrb    r0,[r12,#MaxPort]
+                add     r0,r0,#1
+                strb    r0,[r12,#MaxPort]       ; Increment port numbers
+                mov     pc,r14
+                
+.noisa
+                adr     r0,NoPodule
+                str     r0,[stack]              ; Save error
+                ldmfd   stack !,{r0-r11,link}
+                orrs    pc,link,#V_flag
+
+.NoPodule
+                equd    0
+                equs    "No ISAdapter found"+z$:align
+
+.NoPorts
+                equd    0
+                equs    "No COM ports found"+z$:align
+
+.isastarterror
+                str     r0,[stack]
+                ldr     r0,tid
+                swi     "XISA_DeRegister"
+                ldmfd   stack !, {r0-r11,link}
+                cmp     r0,#3
+                adreq   r0,isastarterror_block3
+                adrne   r0,isastarterror_block4
+                orrs    pc,link,#V_flag
+
+.isastarterror_block3
+EQUD errorbase%+1
+EQUS "Cannot claim COM interrupt 3."
+EQUB 0
+ALIGN
+
+.isastarterror_block4
+EQUD errorbase%+2
+EQUS "Cannot claim COM interrupt 4."
+EQUB 0
+ALIGN
+
+.isapage
+                equd    &33c6010
+.irq_maxports
+                equd    0
+                
+.endisa
+]
+ELSE
+IF slot%=4 THEN
+[OPTPASS
+                mov     r6,#0
+
+.RM_Init0
+                adr     r2,PodHeader            ; Get some space
+                mov     r3,r6
+                swi     "XPodule_ReadHeader"    ; Get podule header
+                bvs     RM_NoPodThere
+
+                adr     r2,PodHeader            ; Get some space
+                ldrb    r0,[r2,#3]              ; Lowbyte of prod code
+                cmp     r0,#podule_p
+                ldreqb  r0,[r2,#4]              ; Highbyte of prod code
+                cmpeq   r0,#0
+                ldreqb  r0,[r2,#5]              ; Lowbyte of man code
+                cmpeq   r0,#podule_m
+                ldreqb  r0,[r2,#6]              ; Highbyte of man code
+                cmpeq   r0,#0
+                bleq    add_port                ; Found podule
+
+.RM_NoPodThere
+                add     r6,r6,#1
+                cmp     r6,#8                   ; 8 slots to scan
+                bne     RM_Init0
+]
+ELSE
+[OPTPASS
+                mov     r6,#slot%
+                bl      add_port
+]
+ENDIF:REM end hardcoded
+ENDIF:REM end isadapter
+[OPTPASS
+                ldrb    r0,[r12,#MaxPort]
+                cmp     r0,#0
+                bne     RM_Init1
+
+                adr     r0,NoPodule
+                str     r0,[stack]              ; Save error
+                ldmfd   stack !,{r0-r11,link}
+                orrs    pc,link,#V_flag
+
+.NoPodule
+                equd    0
+                equs    "No serial card(s) installed"+z$:align
+
+.WorkSizeD      equd    WorkSize
+
+.RM_Init1
+                ; Terminate port list
+                mov     r0,#0
+                str     r0,[r10,#port_Line]
+                mov     r0,#100
+                strb    r0,[r10,#port_PerCard]
+
+                bl      New_Buffers
+
+                mov     r9,#0
+                mov     r10,r12
+.Init_Chip
+                ldr     r8,[r10,#port_Line]
+
+]
+IF card%=0 THEN
+[OPT PASS
+                mov     r0,#%10001111           ; Enable FIFOs & flush (other working timeouts)
+]
+ELSE
+[OPT PASS
+                mov     r0,#%00001111           ; Enable FIFOs & flush (iss 2 broken timeout)
+]
+ENDIF
+[OPT PASS
+                strb    r0,[r8,#FIFOControl]
+                mov     r0,#%00001111           ; Enable IRQs
+                strb    r0,[r8,#InterruptEnable]
+
+                mov     r0,r9
+                mov     r1,#38400
+                bl      swi_Speed               ; Set 38400
+
+                mov     r0,r9
+                mov     r1,#%00000000           ; Set 8N1
+                bl      swi_Format
+
+                mov     r0,r9
+                mov     r1,#%10000010
+                mov     r2,#0
+                bl      swi_Control
+
+                add     r10,r10,#64
+                add     r9,r9,#1
+                ldrb    r0,[r12,#MaxPort]
+                cmp     r9,r0
+                bne     Init_Chip
+
+.warmstart
+                ldmfd   stack !, {r0-r11,link}
+                bics    pc,link,#V_flag
+
+.starterror
+                str     r0,[stack]
+                ldmfd   stack !, {r0-r11,link}
+                orrs    pc,link,#V_flag
+
+.hardwaretable
+                ; sync = 33c, slow = 324, med = 32c, fast = 334
+                equd    &3242000
+                equd    &3246000
+                equd    &324A000
+                equd    &324E000
+
+                equd    &3272000
+                equd    &3276000
+                equd    &327A000
+                equd    &327E000
+
+.PodHeader
+                equd    0
+                equd    0
+                equd    0
+                equd    0
+
+.add_port
+                stmfd   r13!,{r14}
+                adr     r1,hardwaretable        ; Get podule address
+                ldr     r11,[r1,r6,lsl#2]
+                mov     r9,r10
+
+]
+IF card%=0 OR card%=1 THEN
+[OPTPASS
+                str     r11,[r10,#(0*64)+port_Hardware]
+                str     r11,[r10,#(1*64)+port_Hardware]
+                str     r11,[r10,#(0*64)+port_Line]
+                add     r0,r11,#PortOffset
+                str     r0,[r10,#(1*64)+port_Line]
+                
+                mov     r0,#0                   ; Clear flags
+                strb    r0,[r10,#(0*64)+port_Flags]
+                strb    r0,[r10,#(1*64)+port_Flags]
+
+                add     r10,r10,#(2*64)
+                ldrb    r0,[r12,#MaxPort]
+                add     r0,r0,#2
+                strb    r0,[r12,#MaxPort]       ; Increment port numbers
+]
+ELSE
+[OPTPASS
+                ; 3 port card - probe for fitted UARTs
+                ; First - check FIFO status to identify Iss2 card
+                mov     r0,#FIFOstatus
+                ldrb    r0,[r11,r0]
+                and     r0,r0,#%111000
+                cmp     r0,#%010000             ; Issue2 has this hardwired
+                moveq   r4,#0                   ; Is issue 2
+                movne   r4,#1                   ; Is issue 1
+
+                ; Port 0
+                add     r0,r11,#2*PortOffset    ; Check for port 0
+                mov     r1,#&55
+                strb    r1,[r0,#ScratchReg]
+                mov     r1,#0
+                strb    r1,[r0,#InterruptEnable]
+                ldrb    r1,[r0,#Data]
+                ldrb    r1,[r0,#ScratchReg]
+                cmp     r1,#&55
+                bne     add_port_none           ; Port 0 fail
+                mov     r1,#&aa
+                strb    r1,[r0,#ScratchReg]
+                mov     r1,#0
+                strb    r1,[r0,#InterruptEnable]
+                ldrb    r1,[r0,#Data]
+                ldrb    r1,[r0,#ScratchReg]
+                cmp     r1,#&aa
+                bne     add_port_none           ; Port 0 fail
+
+                str     r11,[r10,#port_Hardware] ; Hardware addresses
+                str     r0,[r10,#port_Line]
+                mov     r0,#0                   ; First port on card
+                strb    r0,[r10,#port_PerCard]
+                strb    r4,[r10,#port_Flags]
+                add     r10,r10,#64
+
+                ldrb    r0,[r12,#MaxPort]
+                add     r0,r0,#1
+                strb    r0,[r12,#MaxPort]       ; Increment port number
+
+                ; Port 1
+                add     r0,r11,#1*PortOffset    ; Check for port 1
+                mov     r1,#&55
+                strb    r1,[r0,#ScratchReg]
+                mov     r1,#0
+                strb    r1,[r0,#InterruptEnable]
+                ldrb    r1,[r0,#Data]
+                ldrb    r1,[r0,#ScratchReg]
+                cmp     r1,#&55
+                bne     add_port_uartprobe      ; Port 1 fail
+                mov     r1,#&aa
+                strb    r1,[r0,#ScratchReg]
+                mov     r1,#0
+                strb    r1,[r0,#InterruptEnable]
+                ldrb    r1,[r0,#Data]
+                ldrb    r1,[r0,#ScratchReg]
+                cmp     r1,#&aa
+                bne     add_port_uartprobe      ; Port 1 fail
+
+                str     r11,[r10,#port_Hardware] ; Hardware addresses
+                str     r0,[r10,#port_Line]
+                mov     r0,#1                   ; Second port on card
+                strb    r0,[r10,#port_PerCard]
+                strb    r4,[r10,#port_Flags]
+                add     r10,r10,#64
+
+                ldrb    r0,[r12,#MaxPort]
+                add     r0,r0,#1
+                strb    r0,[r12,#MaxPort]       ; Increment port number
+
+                ; Port 2
+                add     r0,r11,#0*PortOffset    ; Check for port 2
+                mov     r1,#&55
+                strb    r1,[r0,#ScratchReg]
+                mov     r1,#0
+                strb    r1,[r0,#InterruptEnable]
+                ldrb    r1,[r0,#Data]
+                ldrb    r1,[r0,#ScratchReg]
+                cmp     r1,#&55
+                bne     add_port_uartprobe      ; Port 2 fail
+                mov     r1,#&aa
+                strb    r1,[r0,#ScratchReg]
+                mov     r1,#0
+                strb    r1,[r0,#InterruptEnable]
+                ldrb    r1,[r0,#Data]
+                ldrb    r1,[r0,#ScratchReg]
+                cmp     r1,#&aa
+                bne     add_port_uartprobe      ; Port 2 fail
+
+                str     r11,[r10,#port_Hardware] ; Hardware addresses
+                str     r0,[r10,#port_Line]
+                mov     r0,#2                   ; Third port on card
+                strb    r0,[r10,#port_PerCard]
+                strb    r4,[r10,#port_Flags]
+                add     r10,r10,#64
+
+                ldrb    r0,[r12,#MaxPort]
+                add     r0,r0,#1
+                strb    r0,[r12,#MaxPort]       ; Increment port number
+
+.add_port_uartprobe
+]
+ENDIF
+[OPTPASS
+                ; Code common to all podule types
+
+                mov     r0,#13                  ; Expansion card IRQ's
+                adr     r1,irq                  ; IRQ handler
+                mov     r2,r9                   ; Workspace
+                add     r3,r11,#IRQstatus
+                mov     r4,#IRQmask             ; IRQ status register
+                swi     "XOS_ClaimDeviceVector"
+                bvs     starterror
+
+                mov     r0,#&3200000            ; IOC
+                ldrb    r1,[r0,#&28]            ; Interrupt enable B
+                orr     r1,r1,#(1<<5)           ; Enable PIRQs
+                strb    r1,[r0,#&28]            ; Re-store
+
+.add_port_none
+                ldmfd   r13!,{pc}
+
+;
+; =======================================================================
+;
+; FINALISE MODULE
+; ===============
+;
+; In;           R12 = private word pointer
+;               R13 = supervisor stack
+;               R10 = fatality indication, 0=non fatal, 1=fatal
+;
+.RM_Final
+                stmfd   stack !, {r0-r12,link}
+                ldr     r12,[r12]
+
+                mov     r9,#0
+                mov     r10,r12
+.RM_FinalL
+                ldr     r11,[r10,#port_Hardware]
+
+                mov     r0,#13                  ; Release irq handler
+                adr     r1,irq                  ; Will double or triple call on 2/3 port cards
+                mov     r2,r10
+                add     r3,r11,#IRQstatus
+                mov     r4,#IRQmask
+                swi     "XOS_ReleaseDeviceVector"
+
+                add     r10,r10,#64
+                add     r9,r9,#1
+                ldrb    r0,[r12,#MaxPort]
+                cmp     r9,r0
+                bne     RM_FinalL
+
+                bl      Kill_Buffers
+
+                mov     r0,#7                   ; Free workspace
+                mov     r2,r12
+                swi     "XOS_Module"
+.RM_Final0
+                ldmfd   stack !, {r0-r12,pc}
+
+;
+; =======================================================================
+;
+; SERVICE CALL HANDLER
+; ====================
+;
+.RM_Service
+                cmp     r1,#&27                 ; Post reset?
+                movne   pc,link                 ; No, return
+
+                stmfd   stack !,{r0-r12,link}
+
+                ldmfd   stack !,{r0-r12,pc}^
+;
+; =======================================================================
+;
+; KEYWORD TABLES
+; ==============
+;
+.RM_Keywords
+                equs    "SerialInputBuffer"+z$:align
+                equd    Serial_IBuffer-RMst
+                equd    &00010101
+                equd    Error_IBuffer-RMst
+                equd    Help_IBuffer-RMst
+
+                equs    "SerialOutputBuffer"+z$:align
+                equd    Serial_OBuffer-RMst
+                equd    &00010101
+                equd    Error_OBuffer-RMst
+                equd    Help_OBuffer-RMst
+
+                equb    0
+
+.Help_IBuffer
+                equs    "*SerialInputBuffer will allocate input "
+                equs    "serial buffers of the requested size."
+                equs    cr$
+.Error_IBuffer
+                equs    "Syntax: *SerialInputBuffer <input size>"+z$:align
+
+.Help_OBuffer
+                equs    "*SerialOutputBuffer will allocate output "
+                equs    "serial buffers of the requested size."
+                equs    cr$
+.Error_OBuffer
+                equs    "Syntax: *SerialOutputBuffer <output size>"+z$:align
+
+.Serial_IBuffer
+                stmfd   stack !,{r0-r9,link}
+                ldr     r12,[r12]
+                mov     r1,r0
+                mov     r0,#10
+                swi     "XOS_ReadUnsigned"
+                movvs   r2,#0
+                cmp     r2,#0
+                strne   r2,RxSize
+                blne    NewBuffers
+                strvs   r0,[stack]
+                ldmfd   stack !,{r0-r9,pc}
+
+.Serial_OBuffer
+                stmfd   stack !,{r0-r9,link}
+                ldr     r12,[r12]
+                mov     r1,r0
+                mov     r0,#10
+                swi     "XOS_ReadUnsigned"
+                movvs   r2,#0
+                cmp     r2,#0
+                strne   r2,TxSize
+                blne    NewBuffers
+                strvs   r0,[stack]
+                ldmfd   stack !,{r0-r9,pc}
+
+.NewBuffers
+                stmfd   stack !,{r14}
+                swi     "XOS_IntOff"
+                bl      Kill_Buffers
+                bl      New_Buffers
+                bvs     NewBuffersE
+                swi     "XOS_IntOn"
+                ldmfd   stack !,{pc}
+.NewBuffersE
+                stmfd   stack !,{r0}
+                mov     r0,#CRxSize
+                str     r0,RxSize
+                mov     r0,#CTxSize
+                str     r0,TxSize
+                bl      New_Buffers
+                ldmfd   stack !,{r0,r14}
+                orrs    pc,link,#V_flag
+
+.RxSize         equd    CRxSize
+.TxSize         equd    CTxSize
+.Threshold_On   equd    (CRxSize DIV4)*1
+.Threshold_Off  equd    (CRxSize DIV4)*3
+
+; _______________________________________________________________________
+;
+; IRQ HANDLER
+; ===========
+;
+.irq
+]
+IF cardt%<>4 THEN
+[OPTPASS
+                stmfd   stack !,{r4-r7,r14}
+
+]
+IF card%<>2 THEN
+[OPTPASS
+                ; Issue 1/2/3 cards - fixed at 2 ports per card
+
+                ldr     r4,[r12,#port_Line]     ; Get chip base
+.irq0
+                ;--- Service port 0
+                ldrb    r0,[r4,#InterruptIdent]
+                tst     r0,#1
+                bne     irq0e
+                bl      irq_service
+
+                bal     irq0
+
+.irq0e
+                add     r12,r12,#64             ; Next port
+                ldr     r4,[r12,#port_Line]     ; Get chip base
+
+.irq1
+                ;--- Service port 1
+                ldrb    r0,[r4,#InterruptIdent]
+                tst     r0,#1
+                ldmnefd stack !,{r4-r7,pc}
+                bl      irq_service
+
+                bal     irq1
+]
+ELSE
+[OPTPASS
+                ; Atomwide cards - 1, 2 or 3 ports per card
+
+                ldr     r4,[r12,#port_Line]     ; Get chip base
+.irq0
+                ;--- Service port 0
+                ldrb    r0,[r4,#InterruptIdent]
+                tst     r0,#1
+                bne     irq0e
+                bl      irq_service
+
+                bal     irq0
+
+.irq0e
+                add     r12,r12,#64             ; Next port
+                ldrb    r4,[r12,#port_PerCard]  ; Get physical number
+                cmp     r4,#1                   ; Port 2 now?
+                ldmnefd stack !,{r4-r7,pc}
+
+                ldr     r4,[r12,#port_Line]     ; Get chip base
+
+.irq1
+                ;--- Service port 1
+                ldrb    r0,[r4,#InterruptIdent]
+                tst     r0,#1
+                bne     irq1e
+                bl      irq_service
+
+                bal     irq1
+
+.irq1e
+                add     r12,r12,#64             ; Next port
+                ldrb    r4,[r12,#port_PerCard]  ; Get physical number
+                cmp     r4,#2                   ; Port 3 now?
+                ldmnefd stack !,{r4-r7,pc}
+
+                ldr     r4,[r12,#port_Line]     ; Get chip base
+
+.irq2
+                ;--- Service port 2
+                ldrb    r0,[r4,#InterruptIdent]
+                tst     r0,#1
+                ldmnefd stack !,{r4-r7,pc}
+                bl      irq_service
+
+                bal     irq2
+]
+ENDIF
+ELSE
+REM isadapter irq handler
+
+[OPTPASS
+.irq
+                stmfd   stack !,{r4-r8,r14}
+                ldr     r0,isapage
+                ldr     r8,[r0]                 ; Get page reg
+
+                mov     r1,#0
+                str     r1,[r0]                 ; Set page 0
+
+.irq0
+                ;--- Service port
+                ldr     r4,[r12,#port_Line]     ; Get chip base
+                ldrb    r0,[r4,#InterruptIdent]
+                tst     r0,#1
+                bne     irq0e
+                bl      irq_service
+                bal     irq0
+
+.irq0e
+                add     r12,r12,#64             ; Next port
+                ldr     r0,irq_maxports
+                cmp     r12,r0
+                blt     irq0
+
+                ldr     r0,isapage
+                mov     r8,r8,lsl#18
+                mov     r8,r8,lsr#2             ; Clear top 2 bits of page
+                str     r8,[r0]                 ; Restore page reg
+                ldmfd   stack !,{r4-r8,pc}
+
+]
+ENDIF
+[OPTPASS
+
+.irq_service
+                and     r0,r0,#&6
+                add     pc,pc,r0,lsl#1          ; Jump into table
+                mov     r0,r0
+
+                bal     modemstatus             ; 000
+                bal     tx                      ; 001
+                bal     rx                      ; 002
+                bal     rxstatus                ; 003
+
+;--- Modem status IRQ handler -------------------------------------------
+.modemstatus_force
+                stmfd   r13!,{r0-r7,r14}
+                ldr     r4,[r12,#port_Line]     ; Get hardware address
+                
+                bl      modemstatus_update
+                
+                tst     r2,#3                   ; CTS/DSR changed?
+                blne    tx                      ; Try kicking TX
+                
+                ldmfd   r13!,{r0-r7,pc}         ; Return
+                
+.modemstatus
+                mov     r5,r14
+                bl      modemstatus_update
+                mov     r14,r5
+                
+                tst     r2,#3                   ; CTS/DSR changed?
+                bne     tx                      ; Try kicking TX
+                
+                ldr     r1,event_routine        ; Any linked event routine?
+                cmp     r1,#0                   ; No?
+                moveq   pc,r14                  ; Just return then
+                mov     r0,#0                   ; r0=0 (status lines)
+                mov     pc,r1                   ; Jump to routine
+
+.modemstatus_afterx
+                mov     r5,r14
+                bl      modemstatus_update
+                mov     r14,r5
+                
+                bal     tx                      ; Try kicking TX
+                mov     pc,r14                  ; And return
+                
+.modemstatus_update
+                ldrb    r2,[r4,#ModemStatus]    ; Clear IRQ
+                mov     r0,r2,lsr#4
+                
+                ldrb    r3,[r12,#port_Flags]    ; Get flags
+                tst     r3,#flag_AtomIss1       ; Is it issue 1 card?
+                beq     modemstatus_up1         ; Nope, no need for this
+                
+                ; Note! Atomwide iss1 card has DSR/RI swapped due to freak wiring accident.
+                bic     r3,r0,#(2+4)
+                tst     r0,#2                   ; DSR set?
+                orrne   r3,r3,#4                ; Show RI as set
+                tst     r0,#4                   ; RI set?
+                orrne   r3,r3,#2                ; Show DSR as set
+                mov     r0,r3
+                
+.modemstatus_up1
+                ldr     r1,[r12,#port_Control]
+                tst     r1,#cable_compat        ; Cable compat mode?
+                beq     modemstatus_1
+
+                mov     r3,#0
+                tst     r0,#1                   ; CTS set?
+                orrne   r3,r3,#2                ; Show DSR as set
+                tst     r0,#2                   ; DSR set?
+                orrne   r3,r3,#1                ; Show CTS as set
+                tst     r0,#4                   ; RI set?
+                orrne   r3,r3,#8                ; Show DCD as set
+                tst     r0,#8                   ; DCD set?
+                orrne   r3,r3,#4                ; Show RI as set
+                mov     r0,r3
+                
+.modemstatus_1
+                bic     r2,r1,#&000f0000
+                orr     r2,r2,r0,lsl#16         ; New status signals
+                str     r2,[r12,#port_Control]  ; Get new lot
+                eor     r2,r2,r1
+                mov     r2,r2,lsr#16            ; r2=changed mask
+                
+                mov     pc,r14
+
+;--- TX data IRQ handler ------------------------------------------------
+.tx                                             ; TX FIFO empty
+                ldrb    r0,[r4,#LineStatus]
+                tst     r0,#(1<<5)
+                moveq   pc,r14                  ; Won't take data now
+
+                mov     r1,#16                  ; FIFO is 16-bytes deep
+                
+                ldr     r3,[r12,#port_TXUsed]
+                cmp     r3,#0
+                moveq   pc,r14                  ; No data to send!
+
+                ldr     r0,[r12,#port_Control]
+                tst     r0,#(send_xoff OR send_xon)
+                bne     tx_override             ; Flow control tx is
+                                                ; priority
+
+                tst     r0,#cts                 ; Check CTS
+                beq     tx_ctslow
+.tx_checkxoff
+                tst     r0,#were_xoffed         ; Check Xon/Xoff
+                movne   pc,r14
+
+                ldr     r5,[r12,#port_TXSize]
+                ldr     r6,[r12,#port_TXTail]
+                ldr     r2,[r12,#port_TXBuffer]
+                mov     r7,r3                   ; r7=space used before xmit
+.tx0a
+                ldrb    r0,[r2,r6]              ; Get byte
+                strb    r0,[r4,#Data]           ; Load into TX FIFO
+                add     r6,r6,#1
+                cmp     r6,r5                   ; Loop?
+                moveq   r6,#0
+                sub     r3,r3,#1
+                
+                subs    r1,r1,#1                ; Decrement FIFO free
+                beq     tx0b
+                
+                cmp     r3,#0
+                bne     tx0a
+.tx0b
+                str     r3,[r12,#port_TXUsed]
+                str     r6,[r12,#port_TXTail]   ; Save buffer info
+                
+                ldr     r1,event_routine        ; Get routine pointer
+                cmp     r1,#0
+                moveq   pc,r14                  ; No event code - return
+                
+                mov     r6,r3                   ; r6=space used after xmit
+                ldr     r5,event_txthreshold    ; Have we crossed threshold
+                
+                cmp     r7,r5                   ; Above/equal to threshold before empty?
+                movlt   pc,r14                  ; No, return
+                cmp     r6,r5                   ; Below threshold now?
+                movge   pc,r14                  ; No, return
+                
+                mov     r0,#2                   ; r0=2 (tx threshold)
+                mov     pc,r1                   ; Jump to it!
+
+.tx_ctslow
+                tst     r0,#txflow_cts          ; Check hardware flow
+                beq     tx_checkxoff            ; Not enabled, send anyway
+
+                mov     pc,r14
+
+.tx_override
+                tst     r0,#send_xoff
+                movne   r2,#Xoff
+                orrne   r0,r0,#weve_xoffed      ; Set 'sent xoff' bit
+                moveq   r2,#Xon
+                bic     r0,r0,#(send_xoff OR send_xon)
+                str     r0,[r12,#port_Control]
+
+                strb    r2,[r4,#Data]           ; Send the byte
+                sub     r7,r7,#1                ; Taken 1 byte of FIFO
+                bal     tx                      ; And carry on.
+
+;--- RX status IRQ handler ----------------------------------------------
+.rxstatus
+                ldrb    r0,[r4,#LineStatus]     ; Clear interrupt
+                mov     pc,r14
+
+;--- RX data IRQ handler ------------------------------------------------
+.rx
+                ;ldrb    r0,[r4,#LineStatus]
+                ;tst     r0,#1
+                ;moveq   pc,r14                  ; No data currently...
+
+                ldr     r3,[r12,#port_RXUsed]
+                ldr     r5,[r12,#port_RXSize]
+                cmp     r3,r5                   ; Any space?
+                bne     rx_isroom               ; Yes
+                
+.rx_noroom
+                ldrb    r0,[r4,#Data]           ; Junk the data...
+                ldrb    r0,[r4,#LineStatus]
+                tst     r0,#1
+                bne     rx_noroom
+                
+                mov     pc,r14                  ; And return
+
+.rx_isroom
+                mov     r1,#0                   ; Go to TX after flag
+
+                ldr     r6,[r12,#port_RXHead]
+                ldr     r2,[r12,#port_RXBuffer]
+
+                ldr     r0,[r12,#port_Control]
+                tst     r0,#txflow_x            ; TX Xon/Xoff control?
+                bne     rx_x1
+.rx1
+                ldrb    r0,[r4,#Data]           ; Get data
+                strb    r0,[r2,r6]              ; Put in buffer
+                add     r6,r6,#1
+                cmp     r6,r5                   ; Loop?
+                moveq   r6,#0
+                add     r3,r3,#1
+                cmp     r3,r5                   ; Any more space?
+                bge     rx1a                    ; No, exit loop
+                ldrb    r0,[r4,#LineStatus]
+                tst     r0,#1                   ; Any more?
+                bne     rx1
+
+.rx1a
+                str     r6,[r12,#port_RXHead]
+
+                ldr     r0,[r12,#port_RXUsed]   ; Get old buffer level
+                str     r3,[r12,#port_RXUsed]   ; Save buffer info
+
+                ldr     r2,Threshold_Off
+                cmp     r3,r2
+                blt     rxend                   ; We above 'Off'?
+
+                cmp     r0,r2
+                bge     rxend                   ; ... and we weren't b4?
+
+                ldr     r0,[r12,#port_Control]
+                tst     r0,#rxflow_x            ; Xon/Xoff RX flow?
+                orrne   r0,r0,#send_xoff        ; Yes, send xoff
+                strne   r0,[r12,#port_Control]
+
+                tst     r0,#rxflow_rts          ; Hardware flow ?
+                beq     rxend
+
+                bic     r0,r0,#rts              ; Clear RTS
+                orr     r0,r0,#weve_rtsed       ; Flow control RTS drop
+                str     r0,[r12,#port_Control]
+
+                and     r0,r0,#3
+                orr     r0,r0,#8
+                strb    r0,[r4,#ModemControl]   ; RTS->low hardware
+
+.rxend
+                cmp     r1,#0
+                beq     rxend_nokick
+                
+                ldr     r1,event_routine        ; Any event routine?
+                cmp     r1,#0                   ; No?
+                beq     rxend_noevent           ; Skip it
+                
+                stmfd   r13!,{r14}
+                adr     r14,rxend_afterevent    ; Set return address
+                mov     r0,#1                   ; r0=1 (new data)
+                mov     pc,r1                   ; Jump to service routine
+.rxend_afterevent
+                ldmfd   r13!,{r14}
+                
+.rxend_noevent
+]
+IF card%>=2 THEN
+[OPTPASS
+                bal     modemstatus_afterx      ; Read modemstatus/Kick
+]
+ELSE
+[OPTPASS
+                bal     tx                      ; Kick TX
+]
+ENDIF
+[OPTPASS
+.rxend_nokick
+                ldr     r1,event_routine        ; Any event to be done?
+                cmp     r1,#0                   ; No?
+                moveq   pc,r14                  ; Just return then
+                mov     r0,#1                   ; r0=1 (new data)
+                mov     pc,r1                   ; Jump to service routine
+
+.rx_x1
+                ldrb    r0,[r4,#Data]           ; Get data
+                cmp     r0,#Xoff                ; An Xoff?
+                beq     rx_xoff
+                cmp     r0,#Xon                 ; An Xon?
+                beq     rx_xon
+
+                strb    r0,[r2,r6]              ; Put in buffer
+                add     r6,r6,#1
+                cmp     r6,r5                   ; Loop?
+                moveq   r6,#0
+                add     r3,r3,#1
+                cmp     r3,r5                   ; Any more space?
+                bge     rx1a                    ; No, exit loop
+.rx_x2ns
+                ldrb    r0,[r4,#LineStatus]
+                tst     r0,#1                   ; Any more?
+                bne     rx_x1
+
+                bal     rx1a
+
+.rx_xoff
+                ldr     r0,[r12,#port_Control]
+                orr     r0,r0,#were_xoffed      ; Xoffed!
+                str     r0,[r12,#port_Control]
+
+                bal     rx_x2ns                 ; Don't store the xoff
+
+.rx_xon
+                ldr     r0,[r12,#port_Control]
+                bic     r0,r0,#were_xoffed      ; Clear 'xoffed' bit
+                str     r0,[r12,#port_Control]
+
+                mov     r1,#1                   ; Call TX afterwards
+
+                bal     rx_x2ns                 ; Don't store the xon
+                
+                
+; _______________________________________________________________________
+;
+; Event routine pointer
+; =====================
+; Called in IRQ mode, r0-r3 can be corrupted, r4=port data pointer,
+; r0=0 for status line change, =1 for new data, =2 for tx threshold cross
+; r14=return address
+
+.event_routine
+                equd    0
+.event_txthreshold
+                equd    0
+
+; _______________________________________________________________________
+;
+; SET SPEED
+; =========
+; r0=port, r1=speed to set
+.setspeed
+                stmfd   stack !,{r0-r2,r11-r12,r14}
+                add     r12,r12,r0,lsl#6        ; Find base of port vars
+                ldr     r11,[r12,#port_Line]
+
+                swi     "XOS_IntOff"
+
+                adr     r2,speedtable           ; Divisor table
+.setspeed1
+                ldr     r0,[r2],#8              ; Get speed
+                cmp     r1,r0                   ; Does it match?
+                beq     setspeed2               ; Yes, set it
+                cmp     r0,#0
+                bne     setspeed1               ; No, loop
+                bal     setspeed0               ; Speed not found
+.setspeed2
+                ldrb    r0,[r11,#LineControl]
+                orr     r0,r0,#128              ; Set DLAB=1
+                strb    r0,[r11,#LineControl]
+
+                ldr     r0,[r2,#-4]             ; Get divisor
+                strb    r0,[r11,#DivisorL]      ; Set low byte
+                mov     r0,r0,lsr#8
+                strb    r0,[r11,#DivisorH]      ; Set high byte
+
+                ldrb    r0,[r11,#LineControl]
+                bic     r0,r0,#128              ; Set DLAB=0
+                strb    r0,[r11,#LineControl]
+
+                str     r1,[r12,#port_Speed]    ; Save the speed
+.setspeed0
+                swi     "XOS_IntOn"
+
+                ldmfd   stack !,{r0-r2,r11-r12,pc}
+
+.speedtable
+]
+IF maxspeed=115200 THEN
+[OPTPASS
+                equd        50:equd 2304
+                equd        75:equd 1536
+                equd       110:equd 1047
+                equd       134:equd  857
+                equd       150:equd  768
+                equd       300:equd  384
+                equd       600:equd  192
+                equd      1200:equd   96
+                equd      1800:equd   64
+                equd      2400:equd   48
+                equd      3600:equd   32
+                equd      4800:equd   24
+                equd      7200:equd   16
+                equd      9600:equd   12
+                equd     14400:equd    8
+                equd     19200:equd    6
+                equd     38400:equd    3
+                equd     57600:equd    2
+                equd    115200:equd    1
+]
+ENDIF
+IF maxspeed=230400 THEN
+[OPTPASS
+                equd        50:equd 2304*2
+                equd        75:equd 1536*2
+                equd       110:equd 1047*2
+                equd       134:equd  857*2
+                equd       150:equd  768*2
+                equd       300:equd  384*2
+                equd       600:equd  192*2
+                equd      1200:equd   96*2
+                equd      1800:equd   64*2
+                equd      2400:equd   48*2
+                equd      3600:equd   32*2
+                equd      4800:equd   24*2
+                equd      7200:equd   16*2
+                equd      9600:equd   12*2
+                equd     14400:equd    8*2
+                equd     19200:equd    6*2
+                equd     38400:equd    3*2
+                equd     57600:equd    2*2
+                equd    115200:equd    1*2
+                equd    230400:equd    1*1
+]
+ENDIF
+IF maxspeed=460800 THEN
+[OPTPASS
+                equd        50:equd 2304*4
+                equd        75:equd 1536*4
+                equd       110:equd 1047*4
+                equd       134:equd  857*4
+                equd       150:equd  768*4
+                equd       300:equd  384*4
+                equd       600:equd  192*4
+                equd      1200:equd   96*4
+                equd      1800:equd   64*4
+                equd      2400:equd   48*4
+                equd      3600:equd   32*4
+                equd      4800:equd   24*4
+                equd      7200:equd   16*4
+                equd      9600:equd   12*4
+                equd     14400:equd    8*4
+                equd     19200:equd    6*4
+                equd     38400:equd    3*4
+                equd     57600:equd    2*4
+                equd    115200:equd    1*4
+                equd    230400:equd    1*2
+                equd    460800:equd    1*1
+]
+ENDIF
+[OPTPASS
+                equd         0:equd    0
+
+; ***********************************************************************
+;
+; SWI HANDLER CODE
+; ================
+;
+; r11 => swi number
+;
+.RM_SWIHandler
+                ldr     r12, [r12]
+                cmp     r11, #(EOJT-JT)/4
+                addcc   pc, pc, r11, lsl #2     ; vector to required SWI
+                bal     badSWI                  ; swi number out of range
+;
+; SWI jump table
+;
+.JT
+                bal     swi_Speed               ; SPSerial_Speed
+                bal     swi_Format              ; SPSerial_Format
+                bal     swi_Control             ; SPSerial_Control
+                bal     swi_TX                  ; SPSerial_TX
+                bal     swi_RX                  ; SPSerial_RX
+                bal     swi_TXPeek              ; SPSerial_TXPeek
+                bal     swi_RXPeek              ; SPSerial_RXPeek
+                bal     swi_TXPurge             ; SPSerial_TXPurge
+                bal     swi_RXPurge             ; SPSerial_RXPurge
+                bal     swi_TXCount             ; SPSerial_TXCount
+                bal     swi_RXCount             ; SPSerial_RXCount
+                bal     swi_Info                ; SPSerial_Info
+                bal     swi_Event               ; SPSerial_Event
+                movs    pc,link
+.EOJT
+.badSWI
+                adr     r0, errSWI
+                orrs    pc, link, #V_flag       ; return with an error
+.errSWI
+                equd    &20101
+                equs    "Unknown Serial SWI number"+z$: align
+.UnknownReason2
+                equd    &20102
+                equs    "Unknown reason code for Serial SWI"+z$:align
+; _______________________________________________________________________
+;
+; SWI NAME DECODE
+; ===============
+;
+.RM_SWIDecode
+                equs    "SPSerial"+z$
+                equs    "Speed"+z$
+                equs    "Format"+z$
+                equs    "Control"+z$
+                equs    "TX"+z$
+                equs    "RX"+z$
+                equs    "TXPeek"+z$
+                equs    "RXPeek"+z$
+                equs    "TXPurge"+z$
+                equs    "RXPurge"+z$
+                equs    "TXCount"+z$
+                equs    "RXCount"+z$
+                equs    "Info"+z$
+                equs    "Event"+z$
+                equb    0
+                align
+; _______________________________________________________________________
+;
+; SWI Speed
+; =========
+; In - r0=port, r1=new speed or -1 to read
+; Out- r1=old speed
+;
+.swi_Speed
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r2-r3,r14}
+                ldrb    r2,[r12,#MaxPort]
+                cmp     r0,r2
+                ldmgefd stack !,{r0,r2-r3,pc}
+
+                add     r2,r12,r0,lsl#6         ; Get port data pointer
+                ldr     r3,[r2,#port_Speed]
+
+                cmn     r1,#0                   ; Just read it?
+                blne    setspeed                ; No, set it.
+
+                mov     r1,r3
+                ldmfd   stack !,{r0,r2-r3,pc}
+
+; _______________________________________________________________________
+;
+; SWI Format
+; ==========
+; In - r0=port, r1=new format or -1 to read
+; Out- r1=old format
+;
+.swi_Format
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r2-r3}
+                ldrb    r2,[r12,#MaxPort]
+                cmp     r0,r2
+                ldmgefd stack !,{r0,r2-r3}
+                movge   pc,r14
+
+                add     r2,r12,r0,lsl#6         ; Get port data pointer
+                ldr     r2,[r2,#port_Line]
+
+                ldrb    r3,[r2,#LineControl]
+                eor     r3,r3,#3
+                and     r3,r3,#&3f              ; r3=old format
+
+                cmp     r1,#0                   ; Just read it?
+                eorge   r1,r1,#3                ; Convert to 16552-speak
+                andge   r1,r1,#&3f
+                strgeb  r1,[r2,#LineControl]
+
+                mov     r1,r3                   ; Return old format
+                ldmfd   stack !,{r0,r2-r3}
+                mov     pc,link
+; _______________________________________________________________________
+;
+; SWI Control
+; ===========
+; In - r0=port, r1=xor mask, r2=and mask
+; Out- r1=old bitset
+;
+; b 0 = dtr
+; b 1 = rts
+; b 2 = break if set
+; b 3 = TX flow control cts
+; b 4 = TX flow control xon/xoff
+; b 5 = RX flow control rts
+; b 6 = RX flow control xon/xoff
+; b 7 = Cable compatibility mode
+; b 8 = loopback mode
+;
+; b16 = cts
+; b17 = dsr
+; b18 = ri
+; b19 = dcd
+; b20 = we're xoff'ed
+; b21 = we've sent an xoff
+;
+.swi_Control
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r2-r4,r12,r14}
+                ldrb    r3,[r12,#MaxPort]
+                cmp     r0,r3
+                ldmgefd stack !,{r0,r2-r4,r12,pc}
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+                ldr     r4,[r12,#port_Line]     ; r4=hardware
+
+                ldr     r3,[r12,#port_Control]  ; r3=old settings
+                orr     r2,r2,#&000f0000
+                bic     r1,r1,#&000f0000
+                and     r2,r3,r2
+                eor     r1,r2,r1
+
+                and     r2,r1,#3                ; Set DTR & RTS
+                tst     r1,#(1<<8)              ; Loopback?
+                orrne   r2,r2,#(1<<4)
+                orr     r2,r2,#8
+                strb    r2,[r4,#ModemControl]
+
+                ldrb    r2,[r4,#LineControl]
+                bic     r2,r2,#(1<<6)
+                tst     r1,#break_if_set        ; Break?
+                orrne   r2,r2,#(1<<6)           ; Yes, set break bit
+                strb    r2,[r4,#LineControl]
+
+                mov     r2,r1
+                ldr     r1,[r12,#port_Control]  ; Load old settings
+                str     r2,[r12,#port_Control]  ; Store new settings
+
+                bl      modemstatus_force
+.swi_Control1
+                ldmfd   stack !,{r0,r2-r4,r12,pc}
+
+; _______________________________________________________________________
+;
+; SWI TX
+; ======
+; In - r0=port, r1=byte (<0x100) or pointer to block (r2=block length)
+; Out- r1=updated pointer, CS if all not inserted, r2=updated length
+;
+.swi_TX
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0-r7,r10,r14}
+                ldrb    r3,[r12,#MaxPort]
+                cmp     r0,r3
+                ldmgefd stack !,{r0-r7,r10,pc}
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+
+                ldr     r5,[r12,#port_TXUsed]
+                ldr     r3,[r12,#port_TXSize]
+                cmp     r5,r3                   ; Any room?
+                bne     swi_TXm0                ; Yes
+
+                bl      modemstatus_force       ; Check modem status is up-to-date
+                ldmfd   stack !,{r0-r7,r10,r14}
+                orrs    pc,r14,#C_flag          ; No, return with CS
+
+.swi_TXm0
+                mov     r10,pc
+                orr     r0,r10,#(1<<27)
+                teqp    r0,#0                   ; Disable IRQs
+                mov     r0,r0
+                
+                ldr     r5,[r12,#port_TXUsed]   ; Get it again, jic!
+.swi_TX0
+                ldr     r0,[r12,#port_TXHead]
+                ldr     r4,[r12,#port_TXBuffer]
+
+                cmp     r1,#&100
+                bge     swi_TXblock
+
+                strb    r1,[r4,r0]              ; Put byte in buffer
+                add     r0,r0,#1
+                cmp     r0,r3                   ; Check for wrap
+                moveq   r0,#0
+                add     r5,r5,#1
+                str     r0,[r12,#port_TXHead]   ; New head pointer
+                str     r5,[r12,#port_TXUsed]   ; Increment used count
+
+                ldr     r7,[r12,#port_Control]  ; Check flow control
+                tst     r7,#were_xoffed         ; XOFFed?
+                bne     swi_TX0e
+                tst     r7,#cts                 ; CTS low?
+                bne     swi_TX0a                ; It's high, continue
+
+                tst     r7,#txflow_cts          ; CTS is low - hw handshake?
+                bne     swi_TX0e                ; Don't kick
+
+.swi_TX0a
+                ldr     r7,[r12,#port_Line]
+                ldrb    r0,[r7,#LineStatus]
+                tst     r0,#(1<<5)
+                beq     swi_TX0e
+
+                ldr     r0,[r12,#port_TXTail]
+                ldrb    r1,[r4,r0]              ; Get byte from buffer
+                strb    r1,[r7,#Data]           ; Put into TX FIFO
+                add     r0,r0,#1
+                cmp     r0,r3                   ; Wrap?
+                moveq   r0,#0
+                sub     r5,r5,#1
+                str     r5,[r12,#port_TXUsed]   ; Decrement used count
+                str     r0,[r12,#port_TXTail]
+
+.swi_TX0e
+                teqp    r10,#0                  ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0-r7,r10,r14}
+                bics    pc,r14,#C_flag          ; Return with CC
+
+.swi_TXblock
+                ldrb    r6,[r1],#1              ; Get byte from buffer
+                strb    r6,[r4,r0]              ; Put byte in buffer
+                add     r0,r0,#1
+                cmp     r0,r3                   ; Check for wrap
+                moveq   r0,#0
+                add     r5,r5,#1
+                subs    r2,r2,#1
+                ble     swi_TXblock1            ; End of fill?
+                cmp     r5,r3                   ; Buffer full?
+                blt     swi_TXblock
+
+.swi_TXblock1
+                str     r0,[r12,#port_TXHead]
+                str     r5,[r12,#port_TXUsed]   ; Save buffer info
+
+                str     r1,[stack,#(4*1)]
+                str     r2,[stack,#(4*2)]
+
+                ldr     r7,[r12,#port_Control]  ; Check flow control
+                tst     r7,#were_xoffed         ; XOFFed?
+                bne     swi_TXblock1e           ; Don't kick
+                tst     r7,#cts                 ; CTS low?
+                bne     swi_TXblock1a           ; It's high, continue
+
+                tst     r7,#txflow_cts          ; CTS is low - hw handshake?
+                bne     swi_TXblock1e           ; Don't kick
+
+.swi_TXblock1a
+
+                ldr     r7,[r12,#port_Line]
+                ldrb    r0,[r7,#LineStatus]
+                tst     r0,#(1<<5)
+                beq     swi_TXblock1e
+
+                ldr     r0,[r12,#port_TXTail]
+                ldrb    r1,[r4,r0]              ; Get byte from buffer
+                strb    r1,[r7,#Data]           ; Put into TX FIFO
+                add     r0,r0,#1
+                cmp     r0,r3                   ; Wrap?
+                moveq   r0,#0
+                sub     r5,r5,#1
+                str     r5,[r12,#port_TXUsed]   ; Decrement used count
+                str     r0,[r12,#port_TXTail]
+
+.swi_TXblock1e
+                teqp    r10,#0                  ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0-r7,r10,r14}
+                cmp     r2,#0                   ; All done?
+                biceqs  pc,r14,#C_flag          ; Return with CC
+                orrnes  pc,r14,#C_flag          ; Return with CS
+; _______________________________________________________________________
+;
+; SWI RX
+; ======
+; In - r0=port, r1=non zero is pointer to block (r2=block length)
+; Out- r1=updated pointer, CS if all not removed, r2=updated length
+;      for single byte r1=data (CC) or -1 (CS) if no data
+;
+.swi_RX
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r3-r7,r14}
+                ldrb    r3,[r12,#MaxPort]
+                cmp     r0,r3
+                ldmgefd stack !,{r0,r3-r7,pc}
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+
+                ldr     r3,[r12,#port_RXUsed]   ; Any data?
+                cmp     r3,#0                   ; Yep!
+                bne     swi_RXm0
+                
+                bl      modemstatus_force       ; Check modem status is up-to-date
+                mvn     r1,#0
+                ldmfd   stack !,{r0,r3-r7,r14}
+                orrs    pc,r14,#C_flag          ; Return with CS
+
+.swi_RXm0
+                mov     r4,pc
+                orr     r0,r4,#(1<<27)
+                teqp    r0,#0                   ; Disable IRQs
+                mov     r0,r0
+
+                ldr     r3,[r12,#port_RXUsed]   ; Get it again, jic
+
+                cmp     r1,#0
+                bne     swi_RXblock
+
+                sub     r3,r3,#1
+                str     r3,[r12,#port_RXUsed]   ; New used value
+                ldr     r3,[r12,#port_RXBuffer]
+                ldr     r0,[r12,#port_RXTail]
+                ldrb    r1,[r3,r0]              ; Get byte
+                ldr     r3,[r12,#port_RXSize]
+                add     r0,r0,#1
+                cmp     r0,r3
+                moveq   r0,#0
+                str     r0,[r12,#port_RXTail]   ; Save new tail
+
+                ldr     r0,Threshold_On
+                ldr     r3,[r12,#port_RXUsed]
+                cmp     r3,r0
+                bgt     swi_RXe                 ; Below threshold?
+
+                ldr     r0,[r12,#port_Control]
+                tst     r0,#(weve_xoffed+weve_rtsed)
+                beq     swi_RXe                 ; Flow control going?
+
+                tst     r0,#weve_xoffed
+                orrne   r0,r0,#send_xon
+
+                tst     r0,#weve_rtsed
+                orrne   r0,r0,#rts
+                ldrne   r3,[r12,#port_Line]     ; Get hardware address
+                andne   r5,r0,#3
+                orr     r5,r5,#8
+                strb    r5,[r3,#ModemControl]   ; Set RTS
+
+                bic     r0,r0,#(weve_xoffed+weve_rtsed)
+                str     r0,[r12,#port_Control]  ; Clear flags
+
+.swi_RXe
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r7,r14}
+                bics    pc,r14,#C_flag          ; Return with CC
+
+.swi_RXblock
+                ldr     r7,[r12,#port_RXSize]
+                ldr     r0,[r12,#port_RXTail]
+                ldr     r5,[r12,#port_RXBuffer]
+.swi_RXblock0
+                ldrb    r6,[r5,r0]              ; Get byte
+                strb    r6,[r1],#1              ; Save it
+                add     r0,r0,#1
+                cmp     r0,r7                   ; Loop?
+                moveq   r0,#0
+                sub     r3,r3,#1
+                subs    r2,r2,#1                ; End of empty?
+                beq     swi_RXblock1
+                cmp     r3,#0                   ; Buffer empty?
+                bne     swi_RXblock0
+
+.swi_RXblock1
+                str     r3,[r12,#port_RXUsed]
+                str     r0,[r12,#port_RXTail]   ; Save buffer info
+
+                ldr     r0,Threshold_On
+                cmp     r3,r0
+                bgt     swi_RXblocke            ; Below threshold?
+
+                ldr     r0,[r12,#port_Control]
+                tst     r0,#(weve_xoffed+weve_rtsed)
+                beq     swi_RXblocke            ; Flow control going?
+
+                tst     r0,#weve_xoffed
+                orrne   r0,r0,#send_xon
+
+                tst     r0,#weve_rtsed
+                orrne   r0,r0,#rts
+                ldrne   r3,[r12,#port_Line]     ; Get hardware address
+                andne   r5,r0,#3
+                orr     r5,r5,#8
+                strb    r5,[r3,#ModemControl]   ; Set RTS
+
+                bic     r0,r0,#(weve_xoffed+weve_rtsed)
+                str     r0,[r12,#port_Control]  ; Clear flags
+
+.swi_RXblocke
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r7,r14}
+                cmp     r2,#0                   ; All done?
+                biceqs  pc,r14,#C_flag          ; Return with CC
+                orrnes  pc,r14,#C_flag          ; Return with CS
+; _______________________________________________________________________
+;
+; SWI TXPeek
+; ==========
+; In - r0=port, r1=non zero is pointer to block (r2=block length)
+; Out- r1=updated pointer, CS if all not removed, r2=updated length
+;      for single byte r1=data (CC) or CS if no data
+;
+.swi_TXPeek
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r3-r7}
+                ldrb    r3,[r12,#MaxPort]
+                cmp     r0,r3
+                ldmgefd stack !,{r0,r3-r7}
+                movge   pc,r14
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+
+                ldr     r3,[r12,#port_TXUsed]   ; Any data?
+                cmp     r3,#0                   ; Nope.
+                mvneq   r1,#0
+                ldmeqfd stack !,{r0,r3-r7}
+                orreqs  pc,r14,#C_flag          ; Return with CS
+
+                mov     r4,pc
+                orr     r0,r4,#(1<<27)
+                teqp    r0,#0                   ; Disable IRQs
+                mov     r0,r0
+
+                cmp     r1,#0
+                bne     swi_TXPeekblock
+
+                ldr     r3,[r12,#port_TXBuffer]
+                ldr     r0,[r12,#port_TXTail]
+                ldrb    r1,[r3,r0]              ; Get byte
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r7}
+                bics    pc,r14,#C_flag          ; Return with CC
+
+.swi_TXPeekblock
+                ldr     r7,[r12,#port_TXSize]
+                ldr     r0,[r12,#port_TXTail]
+                ldr     r5,[r12,#port_TXBuffer]
+.swi_TXPeekblock0
+                ldrb    r6,[r5,r0]              ; Get byte
+                strb    r6,[r1],#1              ; Save it
+                add     r0,r0,#1
+                cmp     r0,r7                   ; Loop?
+                moveq   r0,#0
+                sub     r3,r3,#1
+                subs    r2,r2,#1                ; End of empty?
+                beq     swi_TXPeekblock1
+                cmp     r3,#0                   ; Buffer empty?
+                bne     swi_TXPeekblock0
+
+.swi_TXPeekblock1
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r7}
+                cmp     r2,#0                   ; All done?
+                biceqs  pc,r14,#C_flag          ; Return with CC
+                orrnes  pc,r14,#C_flag          ; Return with CS
+; _______________________________________________________________________
+;
+; SWI RXPeek
+; ==========
+; In - r0=port, r1=non zero is pointer to block (r2=block length)
+; Out- r1=updated pointer, CS if all not removed, r2=updated length
+;      for single byte r1=data (CC) or CS if no data
+;
+.swi_RXPeek
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r3-r7}
+                ldrb    r3,[r12,#MaxPort]
+                cmp     r0,r3
+                ldmgefd stack !,{r0,r3-r7}
+                movge   pc,r14
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+
+                ldr     r3,[r12,#port_RXUsed]   ; Any data?
+                cmp     r3,#0                   ; Nope.
+                mvneq   r1,#0
+                ldmeqfd stack !,{r0,r3-r7}
+                orreqs  pc,r14,#C_flag          ; Return with CS
+
+                mov     r4,pc
+                orr     r0,r4,#(1<<27)
+                teqp    r0,#0                   ; Disable IRQs
+                mov     r0,r0
+
+                cmp     r1,#0
+                bne     swi_RXPeekblock
+
+                ldr     r3,[r12,#port_RXBuffer]
+                ldr     r0,[r12,#port_RXTail]
+                ldrb    r1,[r3,r0]              ; Get byte
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r7}
+                bics    pc,r14,#C_flag          ; Return with CC
+
+.swi_RXPeekblock
+                ldr     r7,[r12,#port_RXSize]
+                ldr     r0,[r12,#port_RXTail]
+                ldr     r5,[r12,#port_RXBuffer]
+.swi_RXPeekblock0
+                ldrb    r6,[r5,r0]              ; Get byte
+                strb    r6,[r1],#1              ; Save it
+                add     r0,r0,#1
+                cmp     r0,r7                   ; Loop?
+                moveq   r0,#0
+                sub     r3,r3,#1
+                subs    r2,r2,#1                ; End of empty?
+                beq     swi_RXPeekblock1
+                cmp     r3,#0                   ; Buffer empty?
+                bne     swi_RXPeekblock0
+
+.swi_RXPeekblock1
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r7}
+                cmp     r2,#0                   ; All done?
+                biceqs  pc,r14,#C_flag          ; Return with CC
+                orrnes  pc,r14,#C_flag          ; Return with CS
+; _______________________________________________________________________
+;
+; SWI TXPurge
+; ===========
+; In - r0=port
+;
+.swi_TXPurge
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r4}
+                ldrb    r4,[r12,#MaxPort]
+                cmp     r0,r4
+                ldmgefd stack !,{r0,r4}
+                movge   pc,r14
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+
+                mov     r4,pc
+                orr     r0,r4,#(1<<27)
+                teqp    r0,#0                   ; Disable IRQs
+                mov     r0,r0
+
+                mov     r0,#0
+                str     r0,[r12,#port_TXHead]
+                str     r0,[r12,#port_TXTail]
+                str     r0,[r12,#port_TXUsed]
+
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r4}
+                mov     pc,r14
+; _______________________________________________________________________
+;
+; SWI RXPurge
+; ===========
+; In - r0=port
+;
+.swi_RXPurge
+                cmp     r0,#0
+                movlt   pc,link
+
+                stmfd   stack !,{r0,r3-r5}
+                ldrb    r4,[r12,#MaxPort]
+                cmp     r0,r4
+                ldmgefd stack !,{r0,r3-r5}
+                movge   pc,r14
+
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+
+                mov     r4,pc
+                orr     r0,r4,#(1<<27)
+                teqp    r0,#0                   ; Disable IRQs
+                mov     r0,r0
+
+                mov     r0,#0
+                str     r0,[r12,#port_RXHead]
+                str     r0,[r12,#port_RXTail]
+                str     r0,[r12,#port_RXUsed]
+
+                ldr     r0,[r12,#port_Control]
+                tst     r0,#(weve_xoffed+weve_rtsed)
+                beq     swi_RXPurgee            ; Flow control going?
+
+                tst     r0,#weve_xoffed
+                orrne   r0,r0,#send_xon
+
+                tst     r0,#weve_rtsed
+                orrne   r0,r0,#rts
+                ldrne   r3,[r12,#port_Line]     ; Get hardware address
+                andne   r5,r0,#3
+                orr     r5,r5,#8
+                strb    r5,[r3,#ModemControl]   ; Set RTS
+
+                bic     r0,r0,#(weve_xoffed+weve_rtsed)
+                str     r0,[r12,#port_Control]  ; Clear flags
+
+.swi_RXPurgee
+                teqp    r4,#0                   ; Restore IRQ state
+                mov     r0,r0
+                
+                ldmfd   stack !,{r0,r3-r5}
+                mov     pc,r14
+
+; _______________________________________________________________________
+;
+; SWI TXCount
+; ===========
+; In - r0=port
+; Out- r1=bytes used, r2=bytes free, r3=size of buffer
+;
+.swi_TXCount
+                cmp     r0,#0
+                movlt   pc,link
+
+                ldrb    r1,[r12,#MaxPort]
+                cmp     r0,r1
+                movge   pc,r14
+
+                stmfd   stack !,{r0,r14}
+                
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+                bl      modemstatus_force       ; Check modem status is up-to-date
+                
+                ldr     r3,[r12,#port_TXSize]
+                ldr     r1,[r12,#port_TXUsed]
+                sub     r2,r3,r1
+                
+                ldmfd   stack !,{r0,pc}
+; _______________________________________________________________________
+;
+; SWI RXCount
+; ===========
+; In - r0=port
+; Out- r1=bytes used, r2=bytes free, r3=size of buffer
+;
+.swi_RXCount
+                cmp     r0,#0
+                movlt   pc,link
+
+                ldrb    r1,[r12,#MaxPort]
+                cmp     r0,r1
+                movge   pc,r14
+
+                stmfd   stack !,{r0,r14}
+                
+                add     r12,r12,r0,lsl#6        ; Get port data pointer
+                bl      modemstatus_force       ; Check modem status is up-to-date
+                
+                ldr     r3,[r12,#port_RXSize]
+                ldr     r1,[r12,#port_RXUsed]
+                sub     r2,r3,r1
+                
+                ldmfd   stack !,{r0,pc}
+; _______________________________________________________________________
+;
+; SWI Info
+; ========
+; In - Nothing
+; Out- r0=max port number, r1=max baud rate
+;
+.swi_Info
+                ldrb    r0,[r12,#MaxPort]
+                subs    r0,r0,#1
+                ldr     r1,maxspeedl
+                mov     pc,r14
+
+.maxspeedl      equd    maxspeed
+
+; _______________________________________________________________________
+;
+; SWI Event
+; =========
+; In - r0=pointer to routine to be called on modem status irq (0 to disable)
+;      r1=TX emptying threshold to generate TX empty event on
+; Out- Nothing
+;
+.swi_Event
+                str     r0,event_routine
+                str     r1,event_txthreshold
+                mov     pc,r14
+
+;
+; Buffer stuff
+;
+
+.New_Buffers
+                stmfd   stack !, {r0-r3,r9-r10,r14}
+                mov     r9,#0
+                mov     r10,r12
+.New_Buffers0
+                mov     r0,#0
+                str     r0,[r10,#port_TXHead]
+                str     r0,[r10,#port_TXTail]
+                str     r0,[r10,#port_TXUsed]
+                str     r0,[r10,#port_RXHead]
+                str     r0,[r10,#port_RXTail]
+                str     r0,[r10,#port_RXUsed]
+
+                strb    r9,[r10,#port_Number]   ; Save actual port number
+
+                mov     r0,#6
+                ldr     r3,TxSize
+                swi     "XOS_Module"            ; Get TX buffer space
+                bvs     nberror
+                str     r2,[r10,#port_TXBuffer]
+
+                ldr     r3,TxSize
+                str     r3,[r10,#port_TXSize]
+
+                mov     r0,#6
+                ldr     r3,RxSize
+                swi     "XOS_Module"            ; Get RX buffer space
+                bvs     nberror
+                str     r2,[r10,#port_RXBuffer]
+
+                ldr     r3,RxSize
+                str     r3,[r10,#port_RXSize]
+
+                add     r10,r10,#64
+                add     r9,r9,#1
+                ldrb    r0,[r12,#MaxPort]
+                cmp     r9,r0
+                bne     New_Buffers0
+
+                ldr     r3,RxSize
+                mov     r0,r3,lsr#2
+                add     r3,r0,r0,lsl#1
+                str     r3,Threshold_Off
+                str     r0,Threshold_On
+
+                ldmfd   stack !,{r0-r3,r9-r10,link}
+                bics    pc,link,#V_flag
+
+.nberror
+                str     r0,[stack]
+                ldmfd   stack !,{r0-r3,r9-r10,link}
+                orrs    pc,link,#V_flag
+
+.Kill_Buffers
+                stmfd   stack !, {r0-r3,r9-r10,r14}
+                mov     r9,#0
+                mov     r10,r12
+.Kill_Buffers0
+                mov     r0,#7
+                ldr     r2,[r10,#port_TXBuffer]
+                swi     "XOS_Module"
+
+                mov     r0,#7
+                ldr     r2,[r10,#port_RXBuffer]
+                swi     "XOS_Module"
+
+                add     r10,r10,#64
+                add     r9,r9,#1
+                ldrb    r0,[r12,#MaxPort]
+                cmp     r9,r0
+                bne     Kill_Buffers0
+                ldmfd   stack !,{r0-r3,r9-r10,pc}
+;
+; Message time
+;
+                equs    "I'll take your brain to another dimension"
+                align
+]
+NEXT
+
+IF slot%=4 OR hardcoded% THEN
+  PRINT"Card ";cardt%;" / Slot ";slot%;" : Code length="P%-CODE%
+
+  *| Make filename
+  IF slot%=4 THEN
+    fn$="!Serial"+STR$cardt%
+  ELSE
+    fn$="Hardcoded.Iss"+STR$(cardt%+1)+"_Slot"+STR$slot%
+  ENDIF
+  
+  *| Save module
+  OSCLI("Save "+fn$+" "+STR$~CODE%+" "+STR$~P%)
+  OSCLI("SetType "+fn$+" Module")
+ENDIF
+
+NEXT
+NEXT
+END
+
+DEFPROCSetConstants
+*|
+*| Port information block layout
+*|
+port_Hardware   =        0
+port_Line       =        4
+port_Control    =        8
+port_Speed      =       12
+port_TXBuffer   =       16
+port_TXHead     =       20
+port_TXTail     =       24
+port_TXUsed     =       28
+port_TXSize     =       32
+port_RXBuffer   =       36
+port_RXHead     =       40
+port_RXTail     =       44
+port_RXUsed     =       48
+port_RXSize     =       52
+port_Number     =       56
+port_PerCard    =       57
+port_Flags      =       58
+
+RS%=0
+Startwork       =       FNRSB(0)
+
+Ports           =       FNRSB(25*64)
+MaxPort         =       FNRSB(1)
+
+Endwork         =       FNRSW(0)  :REM end of workspace
+WorkSize        =       Endwork-Startwork+4
+
+Stack           =       13
+Link            =       14
+stack           =       13
+link            =       14
+sp$             =       CHR$(31)+CHR$(31)
+cr$             =       CHR$(13)+CHR$(10)
+t$              =       CHR$(9)
+z$              =       CHR$(0)
+e$              =       cr$+z$
+
+Create$         =       MID$(TIME$,5,11)
+
+I_bit           =       1<<27
+F_bit           =       1<<26
+V_flag          =       1<<28
+C_flag          =       1<<29
+Z_flag          =       1<<30
+SVC_Mode        =       3
+
+Data            =       0*4
+DivisorL        =       0*4
+InterruptEnable =       1*4
+DivisorH        =       1*4
+InterruptIdent  =       2*4
+FIFOControl     =       2*4
+AFR             =       2*4
+LineControl     =       3*4
+ModemControl    =       4*4
+LineStatus      =       5*4
+ModemStatus     =       6*4
+ScratchReg      =       7*4
+
+InsV            =       &14
+RemV            =       &15
+CnpV            =       &16
+
+dtr             =       (1<<0)
+rts             =       (1<<1)
+break_if_set    =       (1<<2)
+txflow_cts      =       (1<<3)
+txflow_x        =       (1<<4)
+rxflow_rts      =       (1<<5)
+rxflow_x        =       (1<<6)
+cable_compat    =       (1<<7)
+
+cts             =       (1<<16)
+dsr             =       (1<<17)
+ri              =       (1<<18)
+dcd             =       (1<<19)
+were_xoffed     =       (1<<20)
+weve_xoffed     =       (1<<21)
+weve_rtsed      =       (1<<22)
+
+send_xoff       =       (1<<24)
+send_xon        =       (1<<25)
+
+flag_AtomIss1   =       (1<<0) :*| Has broken control pin wiring
+
+Xoff=ASC("S")-64
+Xon=ASC("Q")-64
+
+CTxSize=4096
+CRxSize=16384
+
+ENDPROC
+
+DEFFNRSB(count%)
+LOCAL a%
+a%=RS%
+RS%+=count%
+:=a%
+
+DEFFNRSW(count%)
+LOCAL a%
+RS%-=1
+REPEAT:RS%+=1:UNTIL (RS%AND3)=0
+a%=RS%
+RS%+=(4*count%)
+:=a%
